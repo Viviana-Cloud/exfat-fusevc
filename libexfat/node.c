@@ -536,7 +536,8 @@ int exfat_cache_directory(struct exfat* ef, struct exfat_node* dir)
 	struct exfat_node* node;
 	struct exfat_node* current = NULL;
 
-	if (dir->is_cached)
+	// VC: modified to disable cache in read-only mode for smart storage support
+        if (exfat_get_mode(ef->dev) != EXFAT_MODE_RO && dir->is_cached)
 		return 0; /* already cached */
 
 	while ((rc = readdir(ef, dir, &node, &offset)) == 0)
