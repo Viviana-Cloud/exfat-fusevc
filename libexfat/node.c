@@ -463,6 +463,8 @@ static int readdir(struct exfat* ef, struct exfat_node* parent,
 			break;
 
 		case EXFAT_ENTRY_BITMAP:
+			if (ef->cmap.chunk != NULL)
+				break; /* already loaded */
 			bitmap = (const struct exfat_entry_bitmap*) &entry;
 			ef->cmap.start_cluster = le32_to_cpu(bitmap->start_cluster);
 			if (CLUSTER_INVALID(*ef->sb, ef->cmap.start_cluster))
@@ -529,6 +531,22 @@ static int readdir(struct exfat* ef, struct exfat_node* parent,
 	/* we never reach here */
 }
 
+static void reset_cache(struct exfat* ef, struct exfat_node* node);
+static void tree_detach(struct exfat_node* node);
+
+/* VC: recursively check if a node or any descendant has active FUSE
+   references; used to guard cache invalidation in RO mode. */
+static bool subtree_has_active_references(const struct exfat_node* node)
+{
+	const struct exfat_node* p;
+	if (node->references > 0)
+		return true;
+	for (p = node->child; p != NULL; p = p->next)
+		if (subtree_has_active_references(p))
+			return true;
+	return false;
+}
+
 int exfat_cache_directory(struct exfat* ef, struct exfat_node* dir)
 {
 	off_t offset = 0;
@@ -536,9 +554,29 @@ int exfat_cache_directory(struct exfat* ef, struct exfat_node* dir)
 	struct exfat_node* node;
 	struct exfat_node* current = NULL;
 
-	// VC: modified to disable cache in read-only mode for smart storage support
-        if (exfat_get_mode(ef->dev) != EXFAT_MODE_RO && dir->is_cached)
+	if (exfat_get_mode(ef->dev) != EXFAT_MODE_RO && dir->is_cached)
 		return 0; /* already cached */
+
+	/* VC: in RO mode cache is disabled for smart storage support.
+	   Free existing cached nodes only if no node in the subtree is
+	   actively referenced by FUSE; otherwise keep stale cache to
+	   avoid use-after-free on dangling nodeid pointers. */
+	if (dir->is_cached)
+	{
+		struct exfat_node* p;
+		for (p = dir->child; p != NULL; p = p->next)
+			if (subtree_has_active_references(p))
+				return 0; /* active references: keep stale cache */
+
+		while (dir->child)
+		{
+			p = dir->child;
+			reset_cache(ef, p);
+			tree_detach(p);
+			free(p);
+		}
+		dir->is_cached = false;
+	}
 
 	while ((rc = readdir(ef, dir, &node, &offset)) == 0)
 	{
