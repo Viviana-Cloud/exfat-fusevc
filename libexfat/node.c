@@ -463,9 +463,22 @@ static int readdir(struct exfat* ef, struct exfat_node* parent,
 			break;
 
 		case EXFAT_ENTRY_BITMAP:
-			if (ef->cmap.chunk != NULL)
-				break; /* already loaded */
 			bitmap = (const struct exfat_entry_bitmap*) &entry;
+			if (ef->cmap.chunk != NULL)
+			{
+				/* VC: in RO mode re-read the bitmap from disk on every
+				   root directory scan so that fsstat reflects cluster
+				   allocations made by the host (smart storage support). */
+				if (exfat_get_mode(ef->dev) == EXFAT_MODE_RO &&
+						exfat_pread(ef->dev, ef->cmap.chunk,
+							BMAP_SIZE(ef->cmap.chunk_size),
+							exfat_c2o(ef, ef->cmap.start_cluster)) < 0)
+				{
+					exfat_error("failed to re-read clusters bitmap");
+					return -EIO;
+				}
+				break;
+			}
 			ef->cmap.start_cluster = le32_to_cpu(bitmap->start_cluster);
 			if (CLUSTER_INVALID(*ef->sb, ef->cmap.start_cluster))
 			{
